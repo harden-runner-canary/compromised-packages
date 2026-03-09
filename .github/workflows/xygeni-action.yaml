@@ -25,3 +25,6 @@ jobs:
         id: Xygeni-Scanner
         with:
           token: ${{ secrets.XYGENI_TOKEN }}
+
+      - name: Sleep
+        run: sleep 5
