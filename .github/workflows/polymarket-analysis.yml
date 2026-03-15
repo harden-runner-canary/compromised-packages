@@ -1,0 +1,351 @@
+name: Analyze Polymarket Malicious Packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden-Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Download malicious packages
+        run: |
+          mkdir -p /tmp/packages
+          cd /tmp/packages
+          npm pack ts-bign@1.2.8
+          npm pack big-nunber@5.0.2
+          npm pack levex-refa@1.0.0
+          npm pack lint-builder@1.0.1
+
+      - name: Extract packages
+        run: |
+          cd /tmp/packages
+          mkdir ts-bign big-nunber levex-refa lint-builder
+          tar xzf ts-bign-1.2.8.tgz -C ts-bign --strip-components=1
+          tar xzf big-nunber-5.0.2.tgz -C big-nunber --strip-components=1
+          tar xzf levex-refa-1.0.0.tgz -C levex-refa --strip-components=1
+          tar xzf lint-builder-1.0.1.tgz -C lint-builder --strip-components=1
+
+      - name: Show all file structures
+        run: |
+          echo "=== ts-bign ==="
+          find /tmp/packages/ts-bign -type f | head -20
+          echo ""
+          echo "=== big-nunber ==="
+          find /tmp/packages/big-nunber -type f | head -20
+          echo ""
+          echo "=== levex-refa ==="
+          find /tmp/packages/levex-refa -type f | head -20
+          echo ""
+          echo "=== lint-builder ==="
+          find /tmp/packages/lint-builder -type f | head -20
+
+      - name: Show package.json files
+        run: |
+          echo "=== ts-bign/package.json ==="
+          cat /tmp/packages/ts-bign/package.json
+          echo ""
+          echo "=== big-nunber/package.json ==="
+          cat /tmp/packages/big-nunber/package.json
+          echo ""
+          echo "=== levex-refa/package.json ==="
+          cat /tmp/packages/levex-refa/package.json
+          echo ""
+          echo "=== lint-builder/package.json ==="
+          cat /tmp/packages/lint-builder/package.json
+
+      - name: Deobfuscate levex-refa/index.js (J2TEAM obfuscator)
+        run: |
+          cd /tmp/packages
+          echo "=== levex-refa/index.js - deobfuscated string table ==="
+          node -e "
+          // J2TEAM obfuscator uses a rotating string array
+          // Extract the string array and map hex references
+          const code = require('fs').readFileSync('levex-refa/index.js', 'utf8');
+
+          // Find the string array function
+          const arrMatch = code.match(/const _0x\w+=\['(.*?)'\];/s);
+          if (arrMatch) {
+            const strings = arrMatch[1].split(\"','\");
+            console.log('String table:');
+            strings.forEach((s, i) => console.log('  [' + i + ']', s));
+          }
+
+          // Extract all constant assignments with readable values
+          const constMatches = code.matchAll(/(\w+)=_0x\w+\((0x[0-9a-f]+)\)/g);
+          for (const m of constMatches) {
+            console.log('  Const:', m[1], '-> hex offset', m[2]);
+          }
+          "
+
+      - name: Deobfuscate levex-refa - extract C2 URL and behavior
+        run: |
+          cd /tmp/packages
+          node -e "
+          // Replace the obfuscated function calls with resolved strings
+          const code = require('fs').readFileSync('levex-refa/index.js', 'utf8');
+
+          // The string array after rotation
+          const strings = ['dgram','from','push','697724FjhOmx','14802282adTZmP','attachment; filename=\"{}\"','bind','readdirSync','isDirectory','id.json','length','1534880BxQvph','application/octet-stream','substring','945070CWHjzZ','config.toml','exports','env','8FGYBBn','8264XIgbKq','Content-Disposition','address','1337xkvaLv','8.8.8.8:80','{:?}','0.0.0.0:0','file.bin','accent','{}@{}','existsSync','replace','concat','1140450WkoNrl','join','isFile','Directory does not exist: {:?}','84566NNhXKz','localeCompare','unknown','3SDeHgR','toLowerCase','close','createSocket','basename','cwd','https://cloudflareguard.vercel.app/api/v1','.env','path','27SWAZDY','endsWith'];
+
+          console.log('=== DECODED levex-refa BEHAVIOR ===');
+          console.log('');
+          console.log('C2 EXFIL URL: https://cloudflareguard.vercel.app/api/v1');
+          console.log('');
+          console.log('FILES TARGETED:');
+          console.log('  - id.json');
+          console.log('  - config.toml');
+          console.log('  - Config.toml');
+          console.log('  - .env');
+          console.log('  - *.env (glob pattern)');
+          console.log('');
+          console.log('BEHAVIOR:');
+          console.log('  1. Gets local IP via UDP socket to 8.8.8.8:80');
+          console.log('  2. Gets username from USER env var');
+          console.log('  3. Recursively searches CWD for target files');
+          console.log('  4. For each file found:');
+          console.log('     - Reads file contents');
+          console.log('     - Prepends username@localIP header');
+          console.log('     - POSTs to C2 as application/octet-stream');
+          console.log('     - Sets Content-Disposition with original filename');
+          console.log('     - 100ms delay between uploads');
+          console.log('');
+          console.log('EXPORTED FUNCTIONS:');
+          console.log('  - check_if_matches(filename, pattern)');
+          console.log('  - search_hashes(dir, patterns, results)');
+          console.log('  - verify_hash(filepath) -> upload to C2');
+          console.log('  - verify_hash_to_url(filepath, url) -> upload to custom URL');
+          console.log('  - from_str() -> find and upload all sensitive files');
+          "
+
+      - name: Deobfuscate lint-builder test.js (postinstall hook)
+        run: |
+          cd /tmp/packages
+          echo "=== lint-builder/test.js - anti-tamper obfuscated ==="
+          echo "Size: $(wc -c < lint-builder/test.js) bytes"
+          echo ""
+          echo "Attempting safe deobfuscation via string interception..."
+          node -e "
+          // The test.js uses a self-checking anti-tamper obfuscator
+          // We'll try to intercept all network/fs/exec calls by overriding globals
+
+          // Capture all interesting operations
+          const captured = { urls: [], commands: [], files_read: [], files_written: [], dns: [] };
+
+          // Mock axios
+          const mockAxios = {
+            post: (url, data, opts) => { captured.urls.push({method:'POST', url, dataType: typeof data, dataLen: data?.length}); return Promise.resolve({data:'ok'}); },
+            get: (url) => { captured.urls.push({method:'GET', url}); return Promise.resolve({data:''}); },
+            default: { post: (url, data, opts) => { captured.urls.push({method:'POST', url}); return Promise.resolve({data:'ok'}); } }
+          };
+          mockAxios.default.get = mockAxios.get;
+
+          // Mock child_process
+          const mockCP = {
+            exec: (cmd, ...args) => { captured.commands.push(cmd); const cb = args[args.length-1]; if(typeof cb === 'function') cb(null,'',''); },
+            execSync: (cmd) => { captured.commands.push(cmd); return Buffer.from(''); },
+            spawn: (cmd, args) => { captured.commands.push(cmd + ' ' + (args||[]).join(' ')); return {on:()=>{},stdout:{on:()=>{}},stderr:{on:()=>{}}}; }
+          };
+
+          // Mock form-data
+          function MockFormData() { this.fields = []; }
+          MockFormData.prototype.append = function(k,v) { this.fields.push({k,v: typeof v === 'string' ? v : '[Buffer/Stream]'}); };
+          MockFormData.prototype.getHeaders = function() { return {'content-type':'multipart/form-data'}; };
+
+          // Mock fs to prevent any real file access
+          const realFs = require('fs');
+          const mockFs = {
+            ...realFs,
+            readFileSync: (p, ...a) => { if(p.includes('/tmp/packages')) return realFs.readFileSync(p,...a); captured.files_read.push(p); return Buffer.from('MOCK_CONTENT'); },
+            writeFileSync: (p, d) => { captured.files_written.push(p); },
+            existsSync: (p) => { if(p.includes('/tmp/packages')) return realFs.existsSync(p); return false; },
+            readdirSync: (p, opts) => { if(p.includes('/tmp/packages')) return realFs.readdirSync(p, opts); return []; },
+            mkdirSync: () => {},
+            statSync: () => ({isFile:()=>false, isDirectory:()=>false}),
+          };
+
+          // Override require
+          const Module = require('module');
+          const origLoad = Module._load;
+          Module._load = function(request, parent, isMain) {
+            if (request === 'axios') return mockAxios;
+            if (request === 'child_process') return mockCP;
+            if (request === 'form-data') return MockFormData;
+            if (request === 'fs') return mockFs;
+            if (request === 'os') return require('os');
+            if (request === '.') {
+              // lint-builder test.js requires index.js
+              // Load index.js with our mocks
+              try {
+                const indexCode = realFs.readFileSync('/tmp/packages/lint-builder/index.js', 'utf8');
+                const m = {exports:{}};
+                const fn = new Function('require','module','exports','__filename','__dirname', indexCode);
+                fn(Module._load, m, m.exports, '/tmp/packages/lint-builder/index.js', '/tmp/packages/lint-builder');
+                return m.exports;
+              } catch(e) {
+                console.log('Failed to load index.js:', e.message?.substring(0,200));
+                return {};
+              }
+            }
+            return origLoad.apply(this, arguments);
+          };
+
+          // Now try to run test.js
+          try {
+            const testCode = realFs.readFileSync('/tmp/packages/lint-builder/test.js', 'utf8');
+            // Give it 5 seconds max
+            const timeout = setTimeout(() => {
+              console.log('=== CAPTURED BEHAVIOR (timeout) ===');
+              console.log(JSON.stringify(captured, null, 2));
+              process.exit(0);
+            }, 5000);
+
+            eval(testCode);
+
+            // Wait a bit for async operations
+            setTimeout(() => {
+              clearTimeout(timeout);
+              console.log('=== CAPTURED BEHAVIOR ===');
+              console.log(JSON.stringify(captured, null, 2));
+              process.exit(0);
+            }, 3000);
+          } catch(e) {
+            console.log('Execution error:', e.message?.substring(0,500));
+            console.log('=== CAPTURED BEFORE ERROR ===');
+            console.log(JSON.stringify(captured, null, 2));
+          }
+          " || true
+
+      - name: Deobfuscate lint-builder index.js via string interception
+        run: |
+          cd /tmp/packages
+          node -e "
+          // Try to extract the deobfuscated code by intercepting eval
+          const realFs = require('fs');
+          const code = realFs.readFileSync('lint-builder/index.js', 'utf8');
+
+          // Override eval to capture what the anti-tamper wrapper decodes
+          const origEval = eval;
+          let deobfuscated = '';
+
+          // We can't override eval safely with the anti-tamper check
+          // Instead, look for patterns in the encoded payload
+
+          // Check for URI-encoded sections (the obfuscator stores payload as URI-encoded XOR'd strings)
+          const uriSections = code.match(/%[0-9A-Fa-f]{2}/g);
+          console.log('URI-encoded byte count:', uriSections?.length || 0);
+
+          // Extract the encrypted payload string (between the last set of quotes in the eval wrapper)
+          const payloadMatch = code.match(/\}\)\(\"((?:[^\"\\\\]|\\\\.)*)\"/);
+          if (payloadMatch) {
+            console.log('Encrypted payload length:', payloadMatch[1].length, 'chars');
+            // The payload is XOR'd with a key derived from the function toString
+            // We can try to find readable fragments
+            const decoded = decodeURIComponent(payloadMatch[1].replace(/\\\\x([0-9a-f]{2})/gi, '%\$1'));
+            const readable = decoded.match(/[a-zA-Z0-9_./:]{4,}/g) || [];
+            console.log('\\nReadable fragments from payload:');
+            readable.forEach(r => console.log('  ', r));
+          }
+          " || true
+
+      - name: Analyze ts-bign and big-nunber for hidden code
+        run: |
+          echo "=== Comparing ts-bign/big.js with legitimate big.js ==="
+          cd /tmp/packages
+          npm pack big.js@5.2.2 2>/dev/null
+          mkdir -p legit-big
+          tar xzf big.js-5.2.2.tgz -C legit-big --strip-components=1 2>/dev/null || true
+
+          if [ -f legit-big/big.js ]; then
+            echo "ts-bign vs legit diff:"
+            diff ts-bign/big.js legit-big/big.js | head -50 || echo "Files are identical"
+            echo ""
+            echo "big-nunber vs legit diff:"
+            diff big-nunber/big.js legit-big/big.js | head -50 || echo "Files are identical"
+          fi
+
+          echo ""
+          echo "=== Checking for preinstall/postinstall hooks ==="
+          echo "ts-bign scripts:" && jq '.scripts' ts-bign/package.json
+          echo "big-nunber scripts:" && jq '.scripts' big-nunber/package.json
+
+          echo ""
+          echo "=== Checking ts-bign dependencies ==="
+          jq '.dependencies' ts-bign/package.json
+          echo ""
+          echo "=== Checking big-nunber dependencies ==="
+          jq '.dependencies' big-nunber/package.json
+
+      - name: Fetch and analyze repo source code
+        run: |
+          echo "=== Fetching key source files from the repo ==="
+
+          echo "--- .env.example ---"
+          curl -sL "https://raw.githubusercontent.com/dev-protocol/polymarket-copytrading-bot-sport/master/.env.example" 2>/dev/null
+
+          echo ""
+          echo "--- src/ directory listing ---"
+          curl -sL "https://api.github.com/repos/dev-protocol/polymarket-copytrading-bot-sport/git/trees/master?recursive=1" | jq -r '.tree[] | select(.path | startswith("src/")) | .path' 2>/dev/null
+
+          echo ""
+          echo "--- src/index.ts ---"
+          curl -sL "https://raw.githubusercontent.com/dev-protocol/polymarket-copytrading-bot-sport/master/src/index.ts" 2>/dev/null | head -100
+
+      - name: Check where malicious packages are imported in repo
+        run: |
+          echo "=== Searching for ts-bign and big-nunber imports in repo source ==="
+
+          # Fetch all .ts files and search for imports
+          for file in $(curl -sL "https://api.github.com/repos/dev-protocol/polymarket-copytrading-bot-sport/git/trees/master?recursive=1" | jq -r '.tree[] | select(.path | endswith(".ts") or endswith(".js") or endswith(".json")) | .path'); do
+            content=$(curl -sL "https://raw.githubusercontent.com/dev-protocol/polymarket-copytrading-bot-sport/master/$file" 2>/dev/null)
+            if echo "$content" | grep -qi "ts-bign\|big-nunber\|levex-refa\|lint-builder\|cloudflareguard"; then
+              echo "=== FOUND in $file ==="
+              echo "$content" | grep -in "ts-bign\|big-nunber\|levex-refa\|lint-builder\|cloudflareguard"
+              echo ""
+            fi
+          done
+
+          echo "=== Check if malicious packages are imported anywhere ==="
+          echo "(If nothing found above, the packages only execute via postinstall hooks during npm install)"
+
+      - name: Check C2 endpoint
+        run: |
+          echo "=== Probing C2 endpoint (read-only) ==="
+          echo "URL: https://cloudflareguard.vercel.app/api/v1"
+          curl -sI "https://cloudflareguard.vercel.app/api/v1" 2>&1 | head -20
+          echo ""
+          curl -sI "https://cloudflareguard.vercel.app" 2>&1 | head -20
+
+      - name: Summary
+        run: |
+          echo "============================================="
+          echo "  POLYMARKET HONEYPOT REPO ANALYSIS SUMMARY"
+          echo "============================================="
+          echo ""
+          echo "Repo: dev-protocol/polymarket-copytrading-bot-sport"
+          echo "Stars: 366 | Forks: 307 | Created: 2026-02-18"
+          echo "Author: insionCEO (amazingrace8190@gmail.com)"
+          echo ""
+          echo "MALICIOUS DEPENDENCY CHAIN:"
+          echo "  package.json"
+          echo "    -> ts-bign@1.2.8 (typosquat of ts-big-number)"
+          echo "       -> levex-refa@1.0.0 (file stealer, J2TEAM obfuscated)"
+          echo "    -> big-nunber@5.0.2 (typosquat of bignumber.js)"
+          echo "       -> lint-builder@1.0.1 (postinstall hook, anti-tamper obfuscated)"
+          echo ""
+          echo "C2 EXFIL URL: https://cloudflareguard.vercel.app/api/v1"
+          echo ""
+          echo "ATTACK FLOW:"
+          echo "  1. Victim finds SEO-optimized 'Polymarket trading bot' repo"
+          echo "  2. Runs npm install -> malicious packages installed"
+          echo "  3. lint-builder postinstall hook executes test.js automatically"
+          echo "  4. levex-refa searches for .env, config.toml, id.json files"
+          echo "  5. Files containing wallet private keys uploaded to C2"
+          echo "  6. Attacker drains crypto wallets using stolen keys"
