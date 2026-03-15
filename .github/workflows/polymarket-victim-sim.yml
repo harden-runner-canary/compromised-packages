@@ -1,0 +1,97 @@
+name: Polymarket Honeypot - Victim Simulation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulate-victim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden-Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Clone the malicious repo (as a victim would)
+        run: |
+          git clone https://github.com/dev-protocol/polymarket-copytrading-bot-sport.git bot
+          cd bot
+          echo "=== README instructions the victim would follow ==="
+          head -80 README.md
+
+      - name: Create .env with dummy wallet key (simulating victim)
+        run: |
+          cd bot
+          cat > .env << 'ENVFILE'
+          WALLET_PRIVATE_KEY=0xdeadbeef1234567890abcdef1234567890abcdef1234567890abcdef12345678
+          PROXY_WALLET_ADDRESS=0x742d35Cc6634C0532925a3b844Bc9e7595f2bD10
+          SIGNATURE_TYPE=0
+          ENVFILE
+          echo "=== .env created ==="
+          cat .env
+
+      - name: Run npm install (this triggers postinstall hooks)
+        run: |
+          cd bot
+          echo "=== Running npm install ==="
+          echo "This will trigger lint-builder postinstall hook (node test.js)"
+          npm install 2>&1 || true
+          echo ""
+          echo "=== npm install completed ==="
+
+      - name: Check what got installed in node_modules
+        run: |
+          cd bot
+          echo "=== Malicious packages in node_modules ==="
+          echo ""
+          echo "--- ts-bign ---"
+          ls -la node_modules/ts-bign/ 2>/dev/null || echo "not found"
+          echo ""
+          echo "--- big-nunber ---"
+          ls -la node_modules/big-nunber/ 2>/dev/null || echo "not found"
+          echo ""
+          echo "--- levex-refa ---"
+          ls -la node_modules/levex-refa/ 2>/dev/null || echo "not found"
+          echo ""
+          echo "--- lint-builder ---"
+          ls -la node_modules/lint-builder/ 2>/dev/null || echo "not found"
+          echo ""
+          echo "=== Check if lint-builder postinstall ran ==="
+          echo "Looking for any files created by the malware..."
+          find /home/runner -newer /home/runner/work -name "*.json" -o -name "*.log" -o -name "*.txt" 2>/dev/null | head -20
+
+      - name: Attempt to start the bot (as victim would)
+        run: |
+          cd bot
+          echo "=== Starting bot with: npm run dev:bot ==="
+          echo "This imports ts-bign and big-nunber which trigger levex-refa file stealer"
+          timeout 30 npm run dev:bot 2>&1 || true
+          echo ""
+          echo "=== Bot execution completed/timed out ==="
+
+      - name: Wait for any delayed network activity
+        run: |
+          echo "Waiting 60 seconds for any delayed exfiltration attempts..."
+          sleep 60
+
+      - name: Post-execution forensics
+        run: |
+          echo "=== Checking for exfiltration artifacts ==="
+          echo ""
+          echo "--- Any new files in home directory ---"
+          find /home/runner -newer /home/runner/work -not -path "*/node_modules/*" -not -path "*/.npm/*" -type f 2>/dev/null | head -30
+          echo ""
+          echo "--- Check if .env was accessed (stat) ---"
+          stat bot/.env 2>/dev/null
+          echo ""
+          echo "--- DNS cache (if available) ---"
+          cat /etc/resolv.conf 2>/dev/null
+          echo ""
+          echo "--- Active network connections ---"
+          ss -tunapo 2>/dev/null | head -20 || netstat -tunapo 2>/dev/null | head -20
+          echo ""
+          echo "=== Check Harden-Runner insights for all network connections ==="
+          echo "The Harden-Runner dashboard will show every outbound connection made during this run."
