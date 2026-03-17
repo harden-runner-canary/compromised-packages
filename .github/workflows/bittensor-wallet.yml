@@ -1,0 +1,125 @@
+name: Bittensor Wallet 4.0.2 Analysis
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden-Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Check PyPI availability
+        run: |
+          echo "=== Checking bittensor-wallet 4.0.2 on PyPI ==="
+          curl -sL "https://pypi.org/pypi/bittensor-wallet/4.0.2/json" | python3 -c "
+          import json, sys
+          try:
+              data = json.load(sys.stdin)
+              print('Version:', data['info']['version'])
+              print('Yanked:', data['info'].get('yanked', 'unknown'))
+              print('Yanked reason:', data['info'].get('yanked_reason', 'none'))
+              print()
+              print('Available files:')
+              for f in data.get('urls', []):
+                  print(f'  {f[\"filename\"]} ({f[\"size\"]} bytes, {f[\"packagetype\"]})')
+          except Exception as e:
+              print(f'Error: {e}')
+          " 2>/dev/null || echo "JSON API request failed"
+
+      - name: Download source tarballs
+        run: |
+          mkdir -p /tmp/bittensor
+          cd /tmp/bittensor
+          echo "=== Downloading 4.0.1 (clean) and 4.0.2 (compromised) ==="
+          pip download --no-binary :all: --no-deps "bittensor-wallet==4.0.1" 2>&1 || \
+            curl -sLo bittensor_wallet-4.0.1.tar.gz \
+              "https://files.pythonhosted.org/packages/source/b/bittensor-wallet/bittensor_wallet-4.0.1.tar.gz"
+          pip download --no-binary :all: --no-deps "bittensor-wallet==4.0.2" 2>&1 || \
+            curl -sLo bittensor_wallet-4.0.2.tar.gz \
+              "https://files.pythonhosted.org/packages/source/b/bittensor-wallet/bittensor_wallet-4.0.2.tar.gz"
+          ls -la /tmp/bittensor/
+          echo ""
+          echo "--- SHA256 checksums ---"
+          sha256sum /tmp/bittensor/*.tar.gz 2>/dev/null
+
+      - name: Extract and diff
+        run: |
+          cd /tmp/bittensor
+          mkdir -p v401 v402
+          tar xzf bittensor_wallet-4.0.1.tar.gz -C v401 --strip-components=1 2>/dev/null
+          tar xzf bittensor_wallet-4.0.2.tar.gz -C v402 --strip-components=1 2>/dev/null
+          echo "=== Files that differ ==="
+          diff -rq v401 v402 2>/dev/null || true
+
+      - name: Analyze keyfile.rs backdoor
+        run: |
+          cd /tmp/bittensor
+          echo "=== Line count comparison ==="
+          echo "4.0.1: $(wc -l < v401/src/keyfile.rs 2>/dev/null || echo N/A) lines"
+          echo "4.0.2: $(wc -l < v402/src/keyfile.rs 2>/dev/null || echo N/A) lines"
+          echo ""
+          echo "=== Diff of keyfile.rs ==="
+          diff v401/src/keyfile.rs v402/src/keyfile.rs 2>/dev/null | head -500 || echo "diff failed"
+
+      - name: Search for backdoor indicators
+        run: |
+          cd /tmp/bittensor
+          FILE=v402/src/keyfile.rs
+          for label_pattern in \
+            "Injection points:collect_format_metrics" \
+            "Anti-analysis:is_monitored|proc/uptime|TracerPid|strace|gdb|frida" \
+            "Exfiltration:send_report|flush_pending|post_via_pyo3|post_native_tls|dns_exfil|encode_metrics|detect_wallet_type|cache-gc" \
+            "XOR obfuscation:0x42|0x47|0x5A|0x3C|xor" \
+            "NaCl crypto:sealedbox|PublicKey|crypto_box|sodiumoxide" \
+            "dlopen libssl:dlopen|dlsym|libssl|SSL_CTX|SSL_connect" \
+            "DNS tunneling:dns_exfil|dgram|udp"; do
+            label="${label_pattern%%:*}"
+            pattern="${label_pattern#*:}"
+            echo "=== $label ==="
+            grep -nE "$pattern" "$FILE" 2>/dev/null || echo "Not found"
+            echo ""
+          done
+
+      - name: Analyze release.yml changes
+        run: |
+          cd /tmp/bittensor
+          echo "=== Release workflow diff ==="
+          diff v401/.github/workflows/release.yml v402/.github/workflows/release.yml 2>/dev/null || \
+            echo "release.yml not found at expected path"
+
+      - name: Analyze Cargo changes
+        run: |
+          cd /tmp/bittensor
+          echo "=== Cargo.toml diff ==="
+          diff v401/Cargo.toml v402/Cargo.toml 2>/dev/null || true
+          echo ""
+          echo "=== New dependencies in Cargo.lock ==="
+          diff v401/Cargo.lock v402/Cargo.lock 2>/dev/null | grep "^[><]" | head -40 || true
+
+      - name: Try installing yanked version
+        run: |
+          echo "=== Attempting pip install of yanked 4.0.2 ==="
+          pip install "bittensor-wallet==4.0.2" 2>&1 || echo "Install failed (expected - yanked)"
+
+      - name: Check C2 domain DNS
+        run: |
+          echo "=== DNS lookups for C2 infrastructure ==="
+          for domain in \
+            finney.opentensor-metrics.com \
+            finney.metagraph-stats.com \
+            finney.subtensor-telemetry.com \
+            opentensor-cdn.com \
+            t.opentensor-cdn.com; do
+            echo "--- $domain ---"
+            dig +short A "$domain" 2>/dev/null || echo "lookup failed"
+          done
+          echo ""
+          echo "--- DNS TXT: _dmarc.opentensor-cdn.com (C2 channel) ---"
+          dig +short TXT _dmarc.opentensor-cdn.com 2>/dev/null || echo "TXT lookup failed"
