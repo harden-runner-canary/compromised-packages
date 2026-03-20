@@ -1,0 +1,20 @@
+name: Analyze Malicious Checkout Commit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Run malicious checkout commit
+        uses: actions/checkout@70379aad1a8b40919ce8b382d3cd7d0315cde1d0
+
