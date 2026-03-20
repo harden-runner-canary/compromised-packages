@@ -1,0 +1,53 @@
+name: Trivy Compromised Package Analysis
+
+on:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  execute-trivy-compromised:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download file from Google Drive
+        run: |
+          curl -L "https://drive.google.com/uc?export=download&confirm=t&id=1fWNfmubw_F1h2xnTZz8ho7TQZrirPT3p" -o trivy-compromised.zip
+
+
+      - name: Extract and execute trivy-compromised package
+        run: |
+          echo "=== Extracting trivy-compromised.zip ==="
+          echo "Current directory: $(pwd)"
+          echo ""
+
+          if [ ! -f "trivy-compromised.zip" ]; then
+            echo "Error: trivy-compromised.zip not found in repository root"
+            exit 1
+          fi
+
+          echo "Found trivy-compromised.zip"
+          echo "File size: $(du -h trivy-compromised.zip | cut -f1)"
+          echo ""
+
+          echo "Extracting archive..."
+          unzip -q -P trivy trivy-compromised.zip
+          echo "Extraction complete"
+          echo ""
+
+          echo "=== Contents after extraction ==="
+          ls -la
+          echo ""
