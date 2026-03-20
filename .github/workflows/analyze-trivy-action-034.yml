@@ -1,4 +1,4 @@
-name: Analyze Trivy Action 0.34.0
+name: Analyze Trivy Action
 
 on:
   workflow_dispatch:
@@ -18,8 +18,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Trivy Action 0.34.0
-        uses: aquasecurity/trivy-action@0.34.0
+      - name: Run Trivy Action
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs
           scan-ref: .
