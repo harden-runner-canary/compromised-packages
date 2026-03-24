@@ -7,7 +7,7 @@ permissions: read-all
 
 jobs:
   install-litellm:
-    runs-on: ubuntu-latest
+    runs-on: arc0
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
